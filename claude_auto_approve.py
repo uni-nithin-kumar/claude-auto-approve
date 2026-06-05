@@ -277,6 +277,57 @@ def split_bash_segments(command: str) -> list:
     return [s.strip() for s in segments if s.strip()]
 
 
+# ── Top-level classifiers ─────────────────────────────────────────────────────
+
+def classify_bash(tool_input: dict, mode: str) -> bool:
+    if mode == "off":
+        return False
+    if mode == "force":
+        return True
+    command = tool_input.get("command", "")
+    if not command:
+        return False
+    if "$(" in command or "`" in command:
+        return False
+    segments = split_bash_segments(command)
+    if not segments:
+        return False
+    allow_git_writes = (mode == "docs-write")
+    allow_localhost_post = (mode == "docs-write")
+    return all(
+        is_safe_segment(seg, allow_git_writes=allow_git_writes, allow_localhost_post=allow_localhost_post)
+        for seg in segments
+    )
+
+
+def classify_edit_write(tool_input: dict, mode: str, safe_paths: list) -> bool:
+    if mode == "off":
+        return False
+    if mode == "force":
+        return True
+    file_path = tool_input.get("file_path", "") or tool_input.get("notebook_path", "")
+    if mode == "read-only":
+        return is_safe_path(file_path, ["/tmp"])
+    return is_safe_path(file_path, safe_paths)
+
+
+def classify_mcp(tool_name: str, mode: str) -> bool:
+    if mode == "off":
+        return False
+    if mode == "force":
+        return True
+    if tool_name in BROWSEROS_SAFE_TOOLS:
+        return True
+    if tool_name == "mcp__atlassian__atlassianUserInfo":
+        return True
+    if not tool_name.startswith("mcp__"):
+        return False
+    parts = tool_name.split("__", 2)
+    action = parts[2] if len(parts) >= 3 else ""
+    read_prefixes = ("get_", "list_", "search_", "read_", "fetch_", "view_", "show_")
+    return any(action.startswith(p) for p in read_prefixes)
+
+
 def main():
     defer()
 

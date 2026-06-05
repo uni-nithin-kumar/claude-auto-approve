@@ -290,5 +290,150 @@ class TestIsafeSegment(unittest.TestCase):
         ))
 
 
+class TestClassifyBash(unittest.TestCase):
+    def test_off_defers_ls(self):
+        self.assertFalse(h.classify_bash({"command": "ls -la"}, "off"))
+
+    def test_off_defers_git_log(self):
+        self.assertFalse(h.classify_bash({"command": "git log"}, "off"))
+
+    def test_force_approves_rm(self):
+        self.assertTrue(h.classify_bash({"command": "rm -rf /"}, "force"))
+
+    def test_force_approves_ls(self):
+        self.assertTrue(h.classify_bash({"command": "ls"}, "force"))
+
+    def test_readonly_approves_ls(self):
+        self.assertTrue(h.classify_bash({"command": "ls -la"}, "read-only"))
+
+    def test_readonly_approves_git_log(self):
+        self.assertTrue(h.classify_bash({"command": "git log --oneline -5"}, "read-only"))
+
+    def test_readonly_defers_git_commit(self):
+        self.assertFalse(h.classify_bash({"command": "git commit -m 'fix'"}, "read-only"))
+
+    def test_readonly_defers_curl_post_localhost(self):
+        self.assertFalse(h.classify_bash(
+            {"command": "curl -X POST http://localhost:8089/api -d '{}'"},
+            "read-only"
+        ))
+
+    def test_readonly_approves_curl_get(self):
+        self.assertTrue(h.classify_bash(
+            {"command": "curl -s https://api.github.com/repos/foo"},
+            "read-only"
+        ))
+
+    def test_docswrite_approves_git_commit(self):
+        self.assertTrue(h.classify_bash({"command": "git commit -m 'fix'"}, "docs-write"))
+
+    def test_docswrite_approves_curl_post_localhost(self):
+        self.assertTrue(h.classify_bash(
+            {"command": "curl -X POST http://localhost:8089/api -d '{}'"},
+            "docs-write"
+        ))
+
+    def test_docswrite_defers_rm(self):
+        self.assertFalse(h.classify_bash({"command": "rm -rf /"}, "docs-write"))
+
+    def test_docswrite_defers_git_push_force(self):
+        self.assertFalse(h.classify_bash({"command": "git push --force"}, "docs-write"))
+
+    def test_subshell_dollar_defers(self):
+        self.assertFalse(h.classify_bash({"command": "ls $(pwd)"}, "docs-write"))
+
+    def test_subshell_backtick_defers(self):
+        self.assertFalse(h.classify_bash({"command": "ls `pwd`"}, "docs-write"))
+
+    def test_safe_pipeline_approves(self):
+        self.assertTrue(h.classify_bash(
+            {"command": "git log --oneline -10 | grep feat | head -5"},
+            "docs-write"
+        ))
+
+    def test_unsafe_in_pipeline_defers(self):
+        self.assertFalse(h.classify_bash({"command": "ls | rm -rf"}, "docs-write"))
+
+    def test_empty_command_defers(self):
+        self.assertFalse(h.classify_bash({"command": ""}, "docs-write"))
+
+
+class TestClassifyEditWrite(unittest.TestCase):
+    HOME = str(Path.home())
+
+    def test_off_defers_tmp(self):
+        self.assertFalse(h.classify_edit_write({"file_path": "/tmp/x.py"}, "off", ["/tmp"]))
+
+    def test_force_approves_etc(self):
+        self.assertTrue(h.classify_edit_write({"file_path": "/etc/hosts"}, "force", ["/tmp"]))
+
+    def test_readonly_approves_tmp(self):
+        self.assertTrue(h.classify_edit_write({"file_path": "/tmp/x.py"}, "read-only", ["/tmp"]))
+
+    def test_readonly_defers_workspace(self):
+        self.assertFalse(h.classify_edit_write(
+            {"file_path": f"{self.HOME}/workspace/main.py"},
+            "read-only",
+            [f"{self.HOME}/workspace", "/tmp"]
+        ))
+
+    def test_docswrite_approves_workspace(self):
+        self.assertTrue(h.classify_edit_write(
+            {"file_path": f"{self.HOME}/workspace/main.py"},
+            "docs-write",
+            [f"{self.HOME}/workspace", "/tmp"]
+        ))
+
+    def test_docswrite_defers_etc(self):
+        self.assertFalse(h.classify_edit_write(
+            {"file_path": "/etc/hosts"},
+            "docs-write",
+            [f"{self.HOME}/workspace", "/tmp"]
+        ))
+
+    def test_notebook_path_key_works(self):
+        self.assertTrue(h.classify_edit_write(
+            {"notebook_path": "/tmp/nb.ipynb"},
+            "docs-write",
+            ["/tmp"]
+        ))
+
+    def test_empty_path_defers(self):
+        self.assertFalse(h.classify_edit_write({"file_path": ""}, "docs-write", ["/tmp"]))
+
+
+class TestClassifyMcp(unittest.TestCase):
+    def test_off_defers_snapshot(self):
+        self.assertFalse(h.classify_mcp("mcp__browseros__take_snapshot", "off"))
+
+    def test_force_approves_create(self):
+        self.assertTrue(h.classify_mcp("mcp__atlassian__createJiraIssue", "force"))
+
+    def test_browseros_snapshot_approved(self):
+        self.assertTrue(h.classify_mcp("mcp__browseros__take_snapshot", "docs-write"))
+
+    def test_browseros_click_defers(self):
+        self.assertFalse(h.classify_mcp("mcp__browseros__click", "docs-write"))
+
+    def test_atlassian_user_info_approved(self):
+        self.assertTrue(h.classify_mcp("mcp__atlassian__atlassianUserInfo", "docs-write"))
+
+    def test_atlassian_create_defers(self):
+        self.assertFalse(h.classify_mcp("mcp__atlassian__createJiraIssue", "docs-write"))
+
+    def test_generic_get_prefix_approved(self):
+        self.assertTrue(h.classify_mcp("mcp__someserver__get_user", "docs-write"))
+
+    def test_generic_list_prefix_approved(self):
+        self.assertTrue(h.classify_mcp("mcp__someserver__list_channels", "docs-write"))
+
+    def test_generic_create_defers(self):
+        self.assertFalse(h.classify_mcp("mcp__someserver__create_record", "docs-write"))
+
+    def test_readonly_same_as_docswrite_for_mcp(self):
+        self.assertTrue(h.classify_mcp("mcp__someserver__get_user", "read-only"))
+        self.assertFalse(h.classify_mcp("mcp__someserver__create_record", "read-only"))
+
+
 if __name__ == "__main__":
     unittest.main()
