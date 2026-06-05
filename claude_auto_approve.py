@@ -146,6 +146,137 @@ def is_safe_path(file_path: str, safe_paths: list) -> bool:
     return False
 
 
+# ── Bash helpers ──────────────────────────────────────────────────────────────
+
+def is_safe_curl(command: str, allow_localhost_post: bool = True) -> bool:
+    method_match = re.search(r'-X\s+(\w+)', command)
+    if not method_match:
+        return True
+    method = method_match.group(1).upper()
+    if method == "GET":
+        return True
+    if method in ("POST", "PUT", "PATCH") and allow_localhost_post:
+        return bool(re.search(r'https?://(localhost|127\.0\.0\.1)(:\d+)?', command))
+    return False
+
+
+def is_safe_git(command: str, allow_writes: bool = True) -> bool:
+    parts = command.strip().split()
+    if len(parts) < 2:
+        return False
+    i = 1
+    while i < len(parts) and parts[i] in ("-C", "--git-dir", "--work-tree"):
+        i += 2
+    if i >= len(parts):
+        return False
+    subcmd = parts[i]
+    remaining = parts[i + 1:]
+    if subcmd == "config":
+        read_flags = {"--get", "--list", "-l", "--get-all", "--get-regexp", "--get-urlmatch"}
+        return bool(read_flags.intersection(remaining))
+    allowed = GIT_ALL_SAFE_SUBCOMMANDS if allow_writes else GIT_READ_SUBCOMMANDS
+    if subcmd not in allowed:
+        return False
+    if subcmd == "push":
+        return "--force" not in remaining and "-f" not in remaining
+    if subcmd == "rebase":
+        return "-i" not in remaining and "--interactive" not in remaining
+    if subcmd == "reset":
+        return "--hard" not in remaining and "--mixed" not in remaining
+    return True
+
+
+def is_safe_kubectl(command: str) -> bool:
+    parts = command.strip().split()
+    non_flags = [p for p in parts[1:] if not p.startswith("-")]
+    return bool(non_flags) and non_flags[0] in KUBECTL_SAFE_SUBCOMMANDS
+
+
+def is_safe_gh(command: str) -> bool:
+    parts = command.strip().split()
+    non_flags = [p for p in parts[1:] if not p.startswith("-")]
+    if not non_flags or non_flags[0] not in GH_SAFE_SUBCOMMANDS:
+        return False
+    if non_flags[0] == "api":
+        method_match = re.search(r"--method\s+(\w+)", command)
+        if method_match and method_match.group(1).upper() != "GET":
+            return False
+    return True
+
+
+def is_safe_awk(command: str) -> bool:
+    return "system(" not in command
+
+
+def is_safe_sed(command: str) -> bool:
+    return not re.search(r'\s-[a-zA-Z]*i', command)
+
+
+def is_safe_find(command: str) -> bool:
+    if "-exec" not in command and "-execdir" not in command:
+        return True
+    exec_match = re.search(r"-exec(?:dir)?\s+(\S+)", command)
+    if exec_match:
+        safe_cmds = {"cat", "ls", "grep", "head", "tail", "wc", "stat", "file", "echo", "printf"}
+        return os.path.basename(exec_match.group(1)) in safe_cmds
+    return False
+
+
+def is_safe_tee(command: str) -> bool:
+    return "/dev/null" in command
+
+
+def is_safe_python(command: str) -> bool:
+    if "--version" in command or " -V" in command:
+        return True
+    if " -c " in command or command.endswith(" -c"):
+        return not re.search(r"""open\s*\(.*['"]w['"]""", command)
+    return False
+
+
+def is_safe_segment(seg: str, allow_git_writes: bool = True, allow_localhost_post: bool = True) -> bool:
+    seg = seg.strip()
+    if not seg:
+        return True
+    seg = re.sub(r'^(?:\w+=\S*\s+)+', '', seg).strip()
+    if not seg:
+        return True
+    parts = seg.split()
+    cmd_name = os.path.basename(parts[0])
+    if cmd_name in SAFE_SIMPLE_COMMANDS:
+        return True
+    if cmd_name == "awk":
+        return is_safe_awk(seg)
+    if cmd_name == "sed":
+        return is_safe_sed(seg)
+    if cmd_name == "find":
+        return is_safe_find(seg)
+    if cmd_name == "tee":
+        return is_safe_tee(seg)
+    if cmd_name == "git":
+        return is_safe_git(seg, allow_writes=allow_git_writes)
+    if cmd_name == "kubectl":
+        return is_safe_kubectl(seg)
+    if cmd_name == "curl":
+        return is_safe_curl(seg, allow_localhost_post=allow_localhost_post)
+    if cmd_name == "gh":
+        return is_safe_gh(seg)
+    if cmd_name in ("python3", "python", "python3.12", "python3.11", "python3.10"):
+        return is_safe_python(seg)
+    if cmd_name in ("pip", "pip3"):
+        return len(parts) > 1 and parts[1] in ("show", "list", "freeze", "check")
+    if cmd_name == "npm":
+        return len(parts) > 1 and parts[1] in ("list", "ls", "version")
+    if cmd_name == "brew":
+        return len(parts) > 1 and parts[1] in ("list", "info", "outdated")
+    return False
+
+
+def split_bash_segments(command: str) -> list:
+    segments = re.split(r'\|\||\|(?!\|)|&&|;', command)
+    return [s.strip() for s in segments if s.strip()]
+
+
 def main():
     defer()
 
