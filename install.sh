@@ -21,12 +21,13 @@ echo "✓ Python 3.8+ found"
 
 mkdir -p "$HOOKS_DIR"
 
-DEFAULT_PATHS="$HOME/workspace $HOME/sandbox $HOME/.claude /tmp"
+DEFAULT_PATHS="$HOME/.claude /tmp"
 echo ""
 echo "Default safe write paths (Edit/Write auto-approved in docs-write mode):"
 for p in $DEFAULT_PATHS; do echo "  $p"; done
 echo ""
-echo "Add extra paths? (space-separated, e.g. ~/Obsidian ~/projects  — or press Enter to skip)"
+echo "Add your project directories (space-separated, e.g. ~/workspace ~/projects ~/dev ~/Obsidian)"
+echo "Press Enter to skip (you can edit ~/.claude/hooks/claude-auto-approve.json later)"
 read -r EXTRA_PATHS
 
 ALL_PATHS="$DEFAULT_PATHS ${EXTRA_PATHS:-}"

@@ -73,7 +73,7 @@ class TestGetSafeWritePaths(unittest.TestCase):
     def test_uses_defaults_when_config_empty(self):
         paths = h.get_safe_write_paths({})
         self.assertIn("/tmp", paths)
-        self.assertTrue(any("workspace" in p for p in paths))
+        self.assertTrue(any(".claude" in p for p in paths))
 
     def test_expands_tilde(self):
         paths = h.get_safe_write_paths({"safe_write_paths": ["~/myprojects"]})

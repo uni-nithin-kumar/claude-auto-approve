@@ -1,9 +1,10 @@
 {
   "safe_write_paths": [
-    "~/workspace",
-    "~/sandbox",
     "~/.claude",
     "/tmp",
+    "~/workspace",
+    "~/projects",
+    "~/dev",
     "~/Obsidian",
     "~/Documents/notes"
   ]

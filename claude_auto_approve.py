@@ -22,8 +22,6 @@ MODE_FILE = Path.home() / ".claude" / "hooks" / ".approve-mode"
 CONFIG_FILE = Path.home() / ".claude" / "hooks" / "claude-auto-approve.json"
 
 DEFAULT_SAFE_WRITE_PATHS = [
-    str(Path.home() / "workspace"),
-    str(Path.home() / "sandbox"),
     str(Path.home() / ".claude"),
     "/tmp",
 ]
