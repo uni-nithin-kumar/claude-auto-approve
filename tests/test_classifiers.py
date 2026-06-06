@@ -339,11 +339,21 @@ class TestClassifyBash(unittest.TestCase):
     def test_docswrite_defers_git_push_force(self):
         self.assertFalse(h.classify_bash({"command": "git push --force"}, "docs-write"))
 
-    def test_subshell_dollar_defers(self):
-        self.assertFalse(h.classify_bash({"command": "ls $(pwd)"}, "docs-write"))
+    def test_subshell_safe_inner_approves(self):
+        # ls $(pwd) — both outer and inner are safe → now allowed
+        self.assertTrue(h.classify_bash({"command": "ls $(pwd)"}, "docs-write"))
 
-    def test_subshell_backtick_defers(self):
-        self.assertFalse(h.classify_bash({"command": "ls `pwd`"}, "docs-write"))
+    def test_subshell_unsafe_inner_defers(self):
+        # ls $(rm file) — inner rm is unsafe → defers
+        self.assertFalse(h.classify_bash({"command": "ls $(rm file)"}, "docs-write"))
+
+    def test_backtick_safe_inner_approves(self):
+        # ls `pwd` — safe inner → now allowed
+        self.assertTrue(h.classify_bash({"command": "ls `pwd`"}, "docs-write"))
+
+    def test_backtick_unsafe_inner_defers(self):
+        # cat `rm file` — unsafe inner → defers
+        self.assertFalse(h.classify_bash({"command": "cat `rm file`"}, "docs-write"))
 
     def test_safe_pipeline_approves(self):
         self.assertTrue(h.classify_bash(
@@ -433,6 +443,108 @@ class TestClassifyMcp(unittest.TestCase):
     def test_readonly_same_as_docswrite_for_mcp(self):
         self.assertTrue(h.classify_mcp("mcp__someserver__get_user", "read-only"))
         self.assertFalse(h.classify_mcp("mcp__someserver__create_record", "read-only"))
+
+    def test_mcp_allow_pattern_approves_extra_tool(self):
+        self.assertTrue(h.classify_mcp(
+            "mcp__code-review-graph__build_or_update_graph_tool",
+            "docs-write",
+            allow_patterns=[r"^mcp__code-review-graph__"]
+        ))
+
+    def test_mcp_allow_pattern_does_not_approve_non_matching(self):
+        self.assertFalse(h.classify_mcp(
+            "mcp__atlassian__createJiraIssue",
+            "docs-write",
+            allow_patterns=[r"^mcp__code-review-graph__"]
+        ))
+
+
+class TestExcludePatterns(unittest.TestCase):
+    def test_exclude_blocks_matching_command(self):
+        self.assertFalse(h.classify_bash(
+            {"command": "git push origin main --tags"},
+            "docs-write",
+            exclude_patterns=[r"git push.*--tags"]
+        ))
+
+    def test_exclude_does_not_block_non_matching(self):
+        self.assertTrue(h.classify_bash(
+            {"command": "git push origin main"},
+            "docs-write",
+            exclude_patterns=[r"git push.*--tags"]
+        ))
+
+    def test_exclude_overrides_force_mode(self):
+        # force mode still blocked by exclude
+        self.assertFalse(h.classify_bash(
+            {"command": "rm -rf /"},
+            "force",
+            exclude_patterns=[r"rm -rf /"]
+        ))
+
+    def test_exclude_invalid_regex_ignored(self):
+        # Invalid regex should not crash; command should be classified normally
+        self.assertTrue(h.classify_bash(
+            {"command": "ls -la"},
+            "docs-write",
+            exclude_patterns=[r"[invalid(regex"]
+        ))
+
+    def test_matches_exclude_function(self):
+        self.assertTrue(h.matches_exclude("rm -rf /tmp", [r"rm -rf"]))
+        self.assertFalse(h.matches_exclude("ls /tmp", [r"rm -rf"]))
+
+
+class TestSubshellInspection(unittest.TestCase):
+    def test_safe_subshell_approves(self):
+        # ls $(pwd) — both outer (ls) and inner (pwd) are safe
+        self.assertTrue(h.classify_bash({"command": "ls $(pwd)"}, "docs-write"))
+
+    def test_safe_subshell_pipeline(self):
+        # cat $(ls /tmp | head -1) — all safe
+        self.assertTrue(h.classify_bash({"command": "cat $(ls /tmp)"}, "docs-write"))
+
+    def test_unsafe_inner_subshell_defers(self):
+        # ls $(rm /tmp/file) — inner rm is unsafe
+        self.assertFalse(h.classify_bash({"command": "ls $(rm /tmp/file)"}, "docs-write"))
+
+    def test_unsafe_outer_with_safe_inner_defers(self):
+        # rm $(pwd) — outer rm is unsafe regardless of inner
+        self.assertFalse(h.classify_bash({"command": "rm $(pwd)"}, "docs-write"))
+
+    def test_nested_subshell_defers(self):
+        # ls $(echo $(pwd)) — nested subshell, too complex, defer
+        self.assertFalse(h.classify_bash({"command": "ls $(echo $(pwd))"}, "docs-write"))
+
+    def test_backtick_safe_approves(self):
+        # ls `pwd` — safe
+        self.assertTrue(h.classify_bash({"command": "ls `pwd`"}, "docs-write"))
+
+    def test_backtick_unsafe_inner_defers(self):
+        self.assertFalse(h.classify_bash({"command": "ls `rm file`"}, "docs-write"))
+
+
+class TestAuditLog(unittest.TestCase):
+    def test_log_decision_writes_jsonl(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+            tmp = Path(f.name)
+        try:
+            with patch.object(h, "AUDIT_LOG", tmp):
+                h.log_decision("Bash", "ls -la", "docs-write", "allow")
+                line = tmp.read_text().strip()
+                entry = json.loads(line)
+                self.assertEqual(entry["tool"], "Bash")
+                self.assertEqual(entry["cmd"], "ls -la")
+                self.assertEqual(entry["mode"], "docs-write")
+                self.assertEqual(entry["decision"], "allow")
+                self.assertIn("ts", entry)
+        finally:
+            tmp.unlink()
+
+    def test_log_decision_silently_ignores_errors(self):
+        # Logging to an unwritable path must not raise
+        with patch.object(h, "AUDIT_LOG", Path("/nonexistent/dir/audit.jsonl")):
+            h.log_decision("Bash", "ls", "docs-write", "allow")  # must not raise
 
 
 if __name__ == "__main__":

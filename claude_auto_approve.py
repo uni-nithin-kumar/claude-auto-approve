@@ -6,20 +6,24 @@ Usage as hook (no args): invoked by Claude Code PreToolUse, reads JSON from stdi
 Usage as CLI:
   claude-auto-approve mode <read-only|docs-write|force|off>
   claude-auto-approve status
+  claude-auto-approve audit [--tail N]
 """
 
 import json
 import sys
 import os
 import re
+import time
+import subprocess
 from pathlib import Path
 
 # ── Modes ────────────────────────────────────────────────────────────────────
 MODES = ("read-only", "docs-write", "force", "off")
 DEFAULT_MODE = "docs-write"
 
-MODE_FILE = Path.home() / ".claude" / "hooks" / ".approve-mode"
+MODE_FILE   = Path.home() / ".claude" / "hooks" / ".approve-mode"
 CONFIG_FILE = Path.home() / ".claude" / "hooks" / "claude-auto-approve.json"
+AUDIT_LOG   = Path.home() / ".claude" / "hooks" / "auto-approve-audit.jsonl"
 
 DEFAULT_SAFE_WRITE_PATHS = [
     str(Path.home() / ".claude"),
@@ -49,7 +53,7 @@ GIT_WRITE_SUBCOMMANDS = {
 GIT_ALL_SAFE_SUBCOMMANDS = GIT_READ_SUBCOMMANDS | GIT_WRITE_SUBCOMMANDS
 
 KUBECTL_SAFE_SUBCOMMANDS = {"get", "describe", "logs", "config", "auth", "top"}
-GH_SAFE_SUBCOMMANDS = {"pr", "issue", "repo", "run", "api", "release"}
+GH_SAFE_SUBCOMMANDS      = {"pr", "issue", "repo", "run", "api", "release"}
 
 BROWSEROS_SAFE_TOOLS = {
     "mcp__browseros__take_snapshot",
@@ -73,6 +77,13 @@ BROWSEROS_SAFE_TOOLS = {
     "mcp__browseros__get_category_actions",
     "mcp__browseros__get_action_details",
     "mcp__browseros__search_documentation",
+}
+
+MODE_ICONS = {
+    "read-only":  "🔒",
+    "docs-write": "✏️",
+    "force":      "⚡",
+    "off":        "⭘",
 }
 
 
@@ -104,9 +115,24 @@ def read_config() -> dict:
 
 
 def get_safe_write_paths(config: dict) -> list:
-    """Expand ~ in all safe_write_paths from config, falling back to defaults."""
+    """Expand ~ in safe_write_paths from config, falling back to defaults."""
     paths = config.get("safe_write_paths", DEFAULT_SAFE_WRITE_PATHS)
     return [str(Path(p).expanduser()) for p in paths]
+
+
+def get_exclude_patterns(config: dict) -> list:
+    """Regex patterns — if a Bash command matches any, it is always deferred."""
+    return config.get("exclude_patterns", [])
+
+
+def get_mcp_allow_patterns(config: dict) -> list:
+    """Regex patterns for extra MCP tools to auto-approve beyond built-ins."""
+    return config.get("mcp_allow_patterns", [])
+
+
+def get_sound_enabled(config: dict) -> bool:
+    """Whether to play a sound on mode switch (default: True)."""
+    return bool(config.get("sound", True))
 
 
 # ── Hook output ───────────────────────────────────────────────────────────────
@@ -123,6 +149,41 @@ def allow() -> None:
 
 def defer() -> None:
     sys.exit(0)
+
+
+# ── Audit log ─────────────────────────────────────────────────────────────────
+
+def log_decision(tool_name: str, summary: str, mode: str, decision: str) -> None:
+    """Append one JSONL line to the audit log. Silently swallows all errors."""
+    try:
+        entry = {
+            "ts":       int(time.time()),
+            "tool":     tool_name,
+            "cmd":      summary[:200],
+            "mode":     mode,
+            "decision": decision,
+        }
+        with AUDIT_LOG.open("a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
+
+
+# ── Notifications ─────────────────────────────────────────────────────────────
+
+def notify_mode_switch(mode: str, sound: bool = True) -> None:
+    """Send a macOS system notification when the mode changes."""
+    if sys.platform != "darwin":
+        return
+    try:
+        icon = MODE_ICONS.get(mode, "")
+        msg  = f"{icon} Mode switched to: {mode}"
+        script = f'display notification "{msg}" with title "claude-auto-approve"'
+        if sound:
+            script += ' sound name "Glass"'
+        subprocess.run(["osascript", "-e", script], capture_output=True, timeout=3)
+    except Exception:
+        pass
 
 
 # ── Path safety ───────────────────────────────────────────────────────────────
@@ -167,7 +228,7 @@ def is_safe_git(command: str, allow_writes: bool = True) -> bool:
         i += 2
     if i >= len(parts):
         return False
-    subcmd = parts[i]
+    subcmd    = parts[i]
     remaining = parts[i + 1:]
     if subcmd == "config":
         read_flags = {"--get", "--list", "-l", "--get-all", "--get-regexp", "--get-urlmatch"}
@@ -185,13 +246,13 @@ def is_safe_git(command: str, allow_writes: bool = True) -> bool:
 
 
 def is_safe_kubectl(command: str) -> bool:
-    parts = command.strip().split()
+    parts     = command.strip().split()
     non_flags = [p for p in parts[1:] if not p.startswith("-")]
     return bool(non_flags) and non_flags[0] in KUBECTL_SAFE_SUBCOMMANDS
 
 
 def is_safe_gh(command: str) -> bool:
-    parts = command.strip().split()
+    parts     = command.strip().split()
     non_flags = [p for p in parts[1:] if not p.startswith("-")]
     if not non_flags or non_flags[0] not in GH_SAFE_SUBCOMMANDS:
         return False
@@ -239,7 +300,7 @@ def is_safe_segment(seg: str, allow_git_writes: bool = True, allow_localhost_pos
     seg = re.sub(r'^(?:\w+=\S*\s+)+', '', seg).strip()
     if not seg:
         return True
-    parts = seg.split()
+    parts    = seg.split()
     cmd_name = os.path.basename(parts[0])
     if cmd_name in SAFE_SIMPLE_COMMANDS:
         return True
@@ -275,25 +336,81 @@ def split_bash_segments(command: str) -> list:
     return [s.strip() for s in segments if s.strip()]
 
 
+def _classify_subshells(command: str, allow_git_writes: bool, allow_localhost_post: bool) -> bool:
+    """
+    Recursively inspect $(...) and `...` subshells.
+
+    Extracts inner commands, classifies each one, then strips them from the
+    outer command so the caller can classify the outer separately.
+
+    Returns (outer_stripped, safe) where safe=False means an inner command
+    failed and the whole expression should defer.
+    """
+    # Detect nested subshells — too complex to parse safely, defer
+    inner_dollar = re.findall(r'\$\(([^)]*)\)', command)
+    inner_tick   = re.findall(r'`([^`]*)`', command)
+
+    for inner in inner_dollar + inner_tick:
+        if "$(" in inner or "`" in inner:
+            # Nested subshell — defer
+            return None, False
+        for seg in split_bash_segments(inner):
+            if not is_safe_segment(seg, allow_git_writes=allow_git_writes,
+                                   allow_localhost_post=allow_localhost_post):
+                return None, False
+
+    # All inner commands are safe; strip them to get the outer command
+    outer = re.sub(r'\$\([^)]*\)', '', command)
+    outer = re.sub(r'`[^`]*`', '', outer)
+    return outer, True
+
+
+# ── Exclude pattern check ────────────────────────────────────────────────────
+
+def matches_exclude(command: str, patterns: list) -> bool:
+    """Return True if command matches any user-configured exclude pattern."""
+    for pattern in patterns:
+        try:
+            if re.search(pattern, command):
+                return True
+        except Exception:
+            pass
+    return False
+
+
 # ── Top-level classifiers ─────────────────────────────────────────────────────
 
-def classify_bash(tool_input: dict, mode: str) -> bool:
+def classify_bash(tool_input: dict, mode: str, exclude_patterns: list = None) -> bool:
     if mode == "off":
         return False
-    if mode == "force":
-        return True
+
     command = tool_input.get("command", "")
     if not command:
         return False
-    if "$(" in command or "`" in command:
+
+    # Exclude patterns always take precedence — even over force mode
+    if exclude_patterns and matches_exclude(command, exclude_patterns):
         return False
+
+    if mode == "force":
+        return True
+
+    allow_git_writes    = (mode == "docs-write")
+    allow_localhost_post = (mode == "docs-write")
+
+    # Subshell inspection: classify inners, then strip and classify outer
+    if "$(" in command or "`" in command:
+        outer, safe = _classify_subshells(command, allow_git_writes, allow_localhost_post)
+        if not safe:
+            return False
+        command = outer  # continue with subshells stripped
+
     segments = split_bash_segments(command)
     if not segments:
         return False
-    allow_git_writes = (mode == "docs-write")
-    allow_localhost_post = (mode == "docs-write")
     return all(
-        is_safe_segment(seg, allow_git_writes=allow_git_writes, allow_localhost_post=allow_localhost_post)
+        is_safe_segment(seg, allow_git_writes=allow_git_writes,
+                        allow_localhost_post=allow_localhost_post)
         for seg in segments
     )
 
@@ -309,7 +426,7 @@ def classify_edit_write(tool_input: dict, mode: str, safe_paths: list) -> bool:
     return is_safe_path(file_path, safe_paths)
 
 
-def classify_mcp(tool_name: str, mode: str) -> bool:
+def classify_mcp(tool_name: str, mode: str, allow_patterns: list = None) -> bool:
     if mode == "off":
         return False
     if mode == "force":
@@ -318,9 +435,17 @@ def classify_mcp(tool_name: str, mode: str) -> bool:
         return True
     if tool_name == "mcp__atlassian__atlassianUserInfo":
         return True
+    # User-configured regex patterns
+    if allow_patterns:
+        for pattern in allow_patterns:
+            try:
+                if re.match(pattern, tool_name):
+                    return True
+            except Exception:
+                pass
     if not tool_name.startswith("mcp__"):
         return False
-    parts = tool_name.split("__", 2)
+    parts  = tool_name.split("__", 2)
     action = parts[2] if len(parts) >= 3 else ""
     read_prefixes = ("get_", "list_", "search_", "read_", "fetch_", "view_", "show_")
     return any(action.startswith(p) for p in read_prefixes)
@@ -335,22 +460,38 @@ def run_hook() -> None:
         defer()
         return
 
-    mode = read_mode()
-    config = read_config()
-    safe_paths = get_safe_write_paths(config)
-    tool_name = data.get("tool_name", "")
-    tool_input = data.get("tool_input", {})
+    mode             = read_mode()
+    config           = read_config()
+    safe_paths       = get_safe_write_paths(config)
+    exclude_patterns = get_exclude_patterns(config)
+    mcp_patterns     = get_mcp_allow_patterns(config)
+    tool_name        = data.get("tool_name", "")
+    tool_input       = data.get("tool_input", {})
 
     try:
         if tool_name == "Bash":
-            if classify_bash(tool_input, mode):
+            cmd = tool_input.get("command", "")
+            if classify_bash(tool_input, mode, exclude_patterns):
+                log_decision(tool_name, cmd, mode, "allow")
                 allow()
+            else:
+                log_decision(tool_name, cmd, mode, "defer")
+
         elif tool_name in ("Edit", "Write", "NotebookEdit"):
+            path = tool_input.get("file_path", "") or tool_input.get("notebook_path", "")
             if classify_edit_write(tool_input, mode, safe_paths):
+                log_decision(tool_name, path, mode, "allow")
                 allow()
+            else:
+                log_decision(tool_name, path, mode, "defer")
+
         elif tool_name.startswith("mcp__"):
-            if classify_mcp(tool_name, mode):
+            if classify_mcp(tool_name, mode, mcp_patterns):
+                log_decision(tool_name, "", mode, "allow")
                 allow()
+            else:
+                log_decision(tool_name, "", mode, "defer")
+
     except Exception:
         pass  # crash → defer safely
 
@@ -363,6 +504,7 @@ def run_cli(args: list) -> None:
     if not args:
         print("Usage: claude-auto-approve mode <read-only|docs-write|force|off>")
         print("       claude-auto-approve status")
+        print("       claude-auto-approve audit [--tail N]")
         sys.exit(1)
 
     subcmd = args[0]
@@ -376,16 +518,50 @@ def run_cli(args: list) -> None:
             print(f"Unknown mode '{mode}'. Valid: {', '.join(MODES)}")
             sys.exit(1)
         write_mode(mode)
-        print(f"Mode set to: {mode}")
+        icon = MODE_ICONS.get(mode, "")
+        print(f"{icon}  Mode set to: {mode}")
+        config = read_config()
+        notify_mode_switch(mode, sound=get_sound_enabled(config))
 
     elif subcmd == "status":
-        mode = read_mode()
-        config = read_config()
-        safe_paths = get_safe_write_paths(config)
-        print(f"Mode:        {mode}")
-        print(f"Mode file:   {MODE_FILE}")
-        print(f"Config:      {CONFIG_FILE}")
-        print(f"Safe paths:  {', '.join(safe_paths)}")
+        mode        = read_mode()
+        config      = read_config()
+        safe_paths  = get_safe_write_paths(config)
+        excludes    = get_exclude_patterns(config)
+        mcp_pats    = get_mcp_allow_patterns(config)
+        icon        = MODE_ICONS.get(mode, "")
+        print(f"Mode:              {icon}  {mode}")
+        print(f"Mode file:         {MODE_FILE}")
+        print(f"Config:            {CONFIG_FILE}")
+        print(f"Audit log:         {AUDIT_LOG}")
+        print(f"Safe paths:        {', '.join(safe_paths)}")
+        if excludes:
+            print(f"Exclude patterns:  {', '.join(excludes)}")
+        if mcp_pats:
+            print(f"MCP allow patterns:{', '.join(mcp_pats)}")
+
+    elif subcmd == "audit":
+        tail = 20
+        if "--tail" in args:
+            idx = args.index("--tail")
+            if idx + 1 < len(args):
+                try:
+                    tail = int(args[idx + 1])
+                except ValueError:
+                    pass
+        if not AUDIT_LOG.exists():
+            print("No audit log yet.")
+            sys.exit(0)
+        lines = AUDIT_LOG.read_text().splitlines()
+        for line in lines[-tail:]:
+            try:
+                e = json.loads(line)
+                ts  = time.strftime("%H:%M:%S", time.localtime(e["ts"]))
+                dec = "✅ allow" if e["decision"] == "allow" else "⏭  defer"
+                cmd = e.get("cmd", "")[:60]
+                print(f"{ts}  {dec}  [{e['mode']:10}]  {e['tool']:20}  {cmd}")
+            except Exception:
+                print(line)
 
     else:
         print(f"Unknown command '{subcmd}'")
