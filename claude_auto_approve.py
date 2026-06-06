@@ -177,18 +177,13 @@ def log_decision(tool_name: str, summary: str, mode: str, decision: str) -> None
 
 # ── Notifications ─────────────────────────────────────────────────────────────
 
-def _notify_macos(title: str, msg: str, sound: bool) -> None:
-    # Sound via afplay — always works regardless of notification permission settings
+def _notify_macos(title: str, msg: str, sound: bool, sound_file: str = "Glass.aiff") -> None:
+    # Sound via afplay — works regardless of notification permission settings
     if sound:
-        sounds = [
-            "/System/Library/Sounds/Glass.aiff",
-            "/System/Library/Sounds/Ping.aiff",
-            "/System/Library/Sounds/Tink.aiff",
-        ]
-        for s in sounds:
-            if Path(s).exists():
-                subprocess.run(["afplay", s], capture_output=True, timeout=3)
-                break
+        path = f"/System/Library/Sounds/{sound_file}"
+        if not Path(path).exists():
+            path = "/System/Library/Sounds/Glass.aiff"
+        subprocess.run(["afplay", path], capture_output=True, timeout=3)
     # Visual banner via osascript (requires Script Editor → Banners in System Settings)
     script = f'display notification "{msg}" with title "{title}"'
     subprocess.run(["osascript", "-e", script], capture_output=True, timeout=3)
@@ -242,9 +237,43 @@ def notify_mode_switch(mode: str, sound: bool = True) -> None:
         title = "claude-auto-approve"
         msg   = f"{icon} Mode switched to: {mode}"
         if sys.platform == "darwin":
-            _notify_macos(title, msg, sound)
+            _notify_macos(title, msg, sound, sound_file="Glass.aiff")
         elif sys.platform.startswith("linux"):
             _notify_linux(title, msg, sound)
+        elif sys.platform == "win32":
+            _notify_windows(title, msg, sound)
+    except Exception:
+        pass
+
+
+def notify_input_needed(tool_name: str, summary: str, sound: bool = True) -> None:
+    """Notify user that Claude is waiting for a permission decision.
+
+    Fires when the hook defers — meaning Claude Code is about to show a
+    permission prompt in the terminal. Use a distinct sound (Tink) so it
+    feels different from the mode-switch chime (Glass).
+    """
+    try:
+        title = "Claude needs your input"
+        label = summary[:60] if summary else tool_name
+        msg   = f"⏸ {tool_name}: {label}"
+        if sys.platform == "darwin":
+            _notify_macos(title, msg, sound, sound_file="Tink.aiff")
+        elif sys.platform.startswith("linux"):
+            subprocess.run(
+                ["notify-send", "-u", "normal", title, msg],
+                capture_output=True, timeout=3,
+            )
+            if sound:
+                for path, player in [
+                    ("/usr/share/sounds/freedesktop/stereo/bell.oga",     ["paplay"]),
+                    ("/usr/share/sounds/freedesktop/stereo/complete.oga", ["paplay"]),
+                ]:
+                    try:
+                        if subprocess.run(player + [path], capture_output=True, timeout=2).returncode == 0:
+                            break
+                    except Exception:
+                        continue
         elif sys.platform == "win32":
             _notify_windows(title, msg, sound)
     except Exception:
@@ -530,8 +559,15 @@ def run_hook() -> None:
     safe_paths       = get_safe_write_paths(config)
     exclude_patterns = get_exclude_patterns(config)
     mcp_patterns     = get_mcp_allow_patterns(config)
+    sound            = get_sound_enabled(config)
     tool_name        = data.get("tool_name", "")
     tool_input       = data.get("tool_input", {})
+
+    # Notify user when deferring (except off mode — user wants full manual control)
+    def _defer_with_notify(summary: str) -> None:
+        log_decision(tool_name, summary, mode, "defer")
+        if mode != "off":
+            notify_input_needed(tool_name, summary, sound=sound)
 
     try:
         if tool_name == "Bash":
@@ -540,7 +576,7 @@ def run_hook() -> None:
                 log_decision(tool_name, cmd, mode, "allow")
                 allow()
             else:
-                log_decision(tool_name, cmd, mode, "defer")
+                _defer_with_notify(cmd)
 
         elif tool_name in ("Edit", "Write", "NotebookEdit"):
             path = tool_input.get("file_path", "") or tool_input.get("notebook_path", "")
@@ -548,14 +584,14 @@ def run_hook() -> None:
                 log_decision(tool_name, path, mode, "allow")
                 allow()
             else:
-                log_decision(tool_name, path, mode, "defer")
+                _defer_with_notify(path)
 
         elif tool_name.startswith("mcp__"):
             if classify_mcp(tool_name, mode, mcp_patterns):
                 log_decision(tool_name, "", mode, "allow")
                 allow()
             else:
-                log_decision(tool_name, "", mode, "defer")
+                _defer_with_notify(tool_name)
 
     except Exception:
         pass  # crash → defer safely
