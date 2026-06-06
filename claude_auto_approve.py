@@ -230,20 +230,6 @@ def _notify_windows(title: str, msg: str, sound: bool) -> None:
     )
 
 
-def notify_mode_switch(mode: str, sound: bool = True) -> None:
-    """Send a system notification when the mode changes (macOS/Linux/Windows)."""
-    try:
-        icon  = MODE_ICONS.get(mode, "")
-        title = "claude-auto-approve"
-        msg   = f"{icon} Mode switched to: {mode}"
-        if sys.platform == "darwin":
-            _notify_macos(title, msg, sound, sound_file="Glass.aiff")
-        elif sys.platform.startswith("linux"):
-            _notify_linux(title, msg, sound)
-        elif sys.platform == "win32":
-            _notify_windows(title, msg, sound)
-    except Exception:
-        pass
 
 
 def notify_input_needed(tool_name: str, summary: str, sound: bool = True) -> None:
@@ -622,8 +608,7 @@ def run_cli(args: list) -> None:
         write_mode(mode)
         icon = MODE_ICONS.get(mode, "")
         print(f"{icon}  Mode set to: {mode}")
-        config = read_config()
-        notify_mode_switch(mode, sound=get_sound_enabled(config))
+        # No sound/notification on mode switch — you're already at the terminal
 
     elif subcmd == "sound":
         if len(args) < 2 or args[1] not in ("on", "off"):
