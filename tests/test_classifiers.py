@@ -84,6 +84,29 @@ class TestGetSafeWritePaths(unittest.TestCase):
         self.assertIn("/custom/path", paths)
 
 
+class TestWriteConfig(unittest.TestCase):
+    def test_write_and_read_config_roundtrip(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            tmp = Path(f.name)
+        try:
+            with patch.object(h, "CONFIG_FILE", tmp):
+                h.write_config({"sound": False, "safe_write_paths": ["/tmp"]})
+                result = h.read_config()
+                self.assertFalse(result["sound"])
+                self.assertEqual(result["safe_write_paths"], ["/tmp"])
+        finally:
+            tmp.unlink()
+
+    def test_get_sound_enabled_default_true(self):
+        self.assertTrue(h.get_sound_enabled({}))
+
+    def test_get_sound_enabled_false(self):
+        self.assertFalse(h.get_sound_enabled({"sound": False}))
+
+    def test_get_sound_enabled_true(self):
+        self.assertTrue(h.get_sound_enabled({"sound": True}))
+
+
 class TestIsPathSafe(unittest.TestCase):
     def test_tmp_is_safe(self):
         self.assertTrue(h.is_safe_path("/tmp/scratch.py", ["/tmp"]))

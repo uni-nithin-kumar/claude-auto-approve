@@ -114,6 +114,12 @@ def read_config() -> dict:
         return {}
 
 
+def write_config(config: dict) -> None:
+    """Write config dict back to CONFIG_FILE, creating dirs if needed."""
+    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")
+
+
 def get_safe_write_paths(config: dict) -> list:
     """Expand ~ in safe_write_paths from config, falling back to defaults."""
     paths = config.get("safe_write_paths", DEFAULT_SAFE_WRITE_PATHS)
@@ -554,6 +560,7 @@ def run_hook() -> None:
 def run_cli(args: list) -> None:
     if not args:
         print("Usage: claude-auto-approve mode <read-only|docs-write|force|off>")
+        print("       claude-auto-approve sound <on|off>")
         print("       claude-auto-approve status")
         print("       claude-auto-approve audit [--tail N]")
         sys.exit(1)
@@ -574,14 +581,28 @@ def run_cli(args: list) -> None:
         config = read_config()
         notify_mode_switch(mode, sound=get_sound_enabled(config))
 
+    elif subcmd == "sound":
+        if len(args) < 2 or args[1] not in ("on", "off"):
+            print("Usage: claude-auto-approve sound <on|off>")
+            sys.exit(1)
+        enabled = args[1] == "on"
+        config  = read_config()
+        config["sound"] = enabled
+        write_config(config)
+        state = "🔊 on" if enabled else "🔇 off"
+        print(f"Sound {state}")
+
     elif subcmd == "status":
         mode        = read_mode()
         config      = read_config()
         safe_paths  = get_safe_write_paths(config)
         excludes    = get_exclude_patterns(config)
         mcp_pats    = get_mcp_allow_patterns(config)
+        sound       = get_sound_enabled(config)
         icon        = MODE_ICONS.get(mode, "")
+        sound_icon  = "🔊" if sound else "🔇"
         print(f"Mode:              {icon}  {mode}")
+        print(f"Sound:             {sound_icon}  {'on' if sound else 'off'}")
         print(f"Mode file:         {MODE_FILE}")
         print(f"Config:            {CONFIG_FILE}")
         print(f"Audit log:         {AUDIT_LOG}")
