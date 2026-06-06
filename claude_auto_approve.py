@@ -171,17 +171,68 @@ def log_decision(tool_name: str, summary: str, mode: str, decision: str) -> None
 
 # ── Notifications ─────────────────────────────────────────────────────────────
 
+# ── Notifications ─────────────────────────────────────────────────────────────
+
+def _notify_macos(title: str, msg: str, sound: bool) -> None:
+    script = f'display notification "{msg}" with title "{title}"'
+    if sound:
+        script += ' sound name "Glass"'
+    subprocess.run(["osascript", "-e", script], capture_output=True, timeout=3)
+
+
+def _notify_linux(title: str, msg: str, sound: bool) -> None:
+    subprocess.run(["notify-send", title, msg], capture_output=True, timeout=3)
+    if sound:
+        # Try PulseAudio then ALSA; both ship on most distros
+        sound_files = [
+            ("/usr/share/sounds/freedesktop/stereo/complete.oga",   ["paplay"]),
+            ("/usr/share/sounds/gnome/default/alerts/glass.ogg",    ["paplay"]),
+            ("/usr/share/sounds/freedesktop/stereo/complete.oga",   ["aplay"]),
+        ]
+        for path, player in sound_files:
+            try:
+                result = subprocess.run(player + [path], capture_output=True, timeout=3)
+                if result.returncode == 0:
+                    break
+            except Exception:
+                continue
+
+
+def _notify_windows(title: str, msg: str, sound: bool) -> None:
+    if sound:
+        try:
+            import winsound  # stdlib on Windows
+            winsound.PlaySound("SystemNotification", winsound.SND_ALIAS | winsound.SND_ASYNC)
+        except Exception:
+            pass
+    # PowerShell balloon notification — no external deps, works on Win 7+
+    ps = (
+        f'Add-Type -AssemblyName System.Windows.Forms; '
+        f'$n = New-Object System.Windows.Forms.NotifyIcon; '
+        f'$n.Icon = [System.Drawing.SystemIcons]::Information; '
+        f'$n.Visible = $true; '
+        f'$n.ShowBalloonTip(4000, "{title}", "{msg}", '
+        f'[System.Windows.Forms.ToolTipIcon]::None); '
+        f'Start-Sleep -Milliseconds 4500; $n.Dispose()'
+    )
+    subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+        capture_output=True, timeout=6,
+    )
+
+
 def notify_mode_switch(mode: str, sound: bool = True) -> None:
-    """Send a macOS system notification when the mode changes."""
-    if sys.platform != "darwin":
-        return
+    """Send a system notification when the mode changes (macOS/Linux/Windows)."""
     try:
-        icon = MODE_ICONS.get(mode, "")
-        msg  = f"{icon} Mode switched to: {mode}"
-        script = f'display notification "{msg}" with title "claude-auto-approve"'
-        if sound:
-            script += ' sound name "Glass"'
-        subprocess.run(["osascript", "-e", script], capture_output=True, timeout=3)
+        icon  = MODE_ICONS.get(mode, "")
+        title = "claude-auto-approve"
+        msg   = f"{icon} Mode switched to: {mode}"
+        if sys.platform == "darwin":
+            _notify_macos(title, msg, sound)
+        elif sys.platform.startswith("linux"):
+            _notify_linux(title, msg, sound)
+        elif sys.platform == "win32":
+            _notify_windows(title, msg, sound)
     except Exception:
         pass
 
