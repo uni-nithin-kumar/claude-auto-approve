@@ -4,7 +4,7 @@ claude-auto-approve: intelligent multi-mode auto-approval hook for Claude Code.
 
 Usage as hook (no args): invoked by Claude Code PreToolUse, reads JSON from stdin.
 Usage as CLI:
-  claude-auto-approve mode <read-only|docs-write|force|off>
+  claude-auto-approve mode <read-only|docs-write|force|off|notify>
   claude-auto-approve status
   claude-auto-approve audit [--tail N]
 """
@@ -18,7 +18,7 @@ import subprocess
 from pathlib import Path
 
 # ── Modes ────────────────────────────────────────────────────────────────────
-MODES = ("read-only", "docs-write", "force", "off")
+MODES = ("read-only", "docs-write", "force", "off", "notify")
 DEFAULT_MODE = "docs-write"
 
 MODE_FILE   = Path.home() / ".claude" / "hooks" / ".approve-mode"
@@ -85,6 +85,7 @@ MODE_ICONS = {
     "docs-write": "✏️",
     "force":      "⚡",
     "off":        "⭘",
+    "notify":     "🔔",
 }
 
 
@@ -137,6 +138,16 @@ def get_mcp_allow_patterns(config: dict) -> list:
     return config.get("mcp_allow_patterns", [])
 
 
+def get_always_allow_commands(config: dict) -> list:
+    """Exact Bash command strings the user permanently approved via notify mode."""
+    return config.get("always_allow_commands", [])
+
+
+def get_notify_timeout(config: dict) -> int:
+    """Seconds to wait for user response in notify mode (default 25s)."""
+    return int(config.get("notify_timeout", 25))
+
+
 def get_sound_enabled(config: dict) -> bool:
     """Whether to play a sound on mode switch (default: True)."""
     return bool(config.get("sound", True))
@@ -158,7 +169,174 @@ def defer() -> None:
     sys.exit(0)
 
 
-# ── Audit log ─────────────────────────────────────────────────────────────────
+# ── Always-allow persistence ──────────────────────────────────────────────────
+
+def handle_always_allow(tool_name: str, tool_input: dict, summary: str) -> None:
+    """Persist an 'Always Allow' decision to config so it auto-approves next time."""
+    try:
+        config = read_config()
+        if tool_name == "Bash":
+            cmds = config.setdefault("always_allow_commands", [])
+            if summary and summary not in cmds:
+                cmds.append(summary)
+        elif tool_name in ("Edit", "Write", "NotebookEdit"):
+            path = tool_input.get("file_path", "") or tool_input.get("notebook_path", "")
+            if path:
+                parent = str(Path(path).expanduser().parent)
+                paths = config.setdefault("safe_write_paths", list(DEFAULT_SAFE_WRITE_PATHS))
+                if parent not in paths:
+                    paths.append(parent)
+        elif tool_name.startswith("mcp__"):
+            patterns = config.setdefault("mcp_allow_patterns", [])
+            exact = f"^{re.escape(tool_name)}$"
+            if exact not in patterns:
+                patterns.append(exact)
+        write_config(config)
+    except Exception:
+        pass
+
+
+# ── Interactive dialogs (notify mode) ────────────────────────────────────────
+# Returns: "allow_once" | "always_allow" | "deny"
+
+def _has_cmd(name: str) -> bool:
+    try:
+        return subprocess.run(["which", name], capture_output=True).returncode == 0
+    except Exception:
+        return False
+
+
+def _ask_macos(title: str, msg: str, timeout: int) -> str:
+    """macOS: osascript display dialog with 3 buttons. Zero deps."""
+    safe_title = title.replace('"', "'")
+    safe_msg   = msg.replace('"', "'").replace("\\", "/")[:200]
+    script = f"""
+try
+    set d to display dialog "{safe_msg}" ¬
+        with title "{safe_title}" ¬
+        buttons {{"Deny", "Allow Once", "Always Allow"}} ¬
+        default button 2 ¬
+        giving up after {timeout}
+    if gave up of d then return "deny"
+    return button returned of d
+on error
+    return "deny"
+end try
+"""
+    r = subprocess.run(["osascript", "-e", script],
+                       capture_output=True, text=True, timeout=timeout + 3)
+    btn = r.stdout.strip()
+    if "Always Allow" in btn:
+        return "always_allow"
+    if "Allow Once" in btn:
+        return "allow_once"
+    return "deny"
+
+
+def _ask_linux(title: str, msg: str, timeout: int) -> str:
+    """Linux: zenity (GUI) or whiptail (TUI headless). Zero deps if either present."""
+    has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+    if has_display and _has_cmd("zenity"):
+        r = subprocess.run([
+            "zenity", "--question",
+            "--title", title,
+            "--text", msg[:200],
+            "--ok-label", "Allow Once",
+            "--extra-button", "Always Allow",
+            "--cancel-label", "Deny",
+            "--timeout", str(timeout),
+        ], capture_output=True, text=True, timeout=timeout + 3)
+        if "Always Allow" in r.stdout:
+            return "always_allow"
+        if r.returncode == 0:
+            return "allow_once"
+        return "deny"
+
+    if _has_cmd("whiptail"):
+        # whiptail writes selection to stderr
+        r = subprocess.run([
+            "whiptail", "--title", title,
+            "--menu", msg[:80], "15", "72", "3",
+            "1", "Allow Once",
+            "2", "Always Allow",
+            "3", "Deny",
+        ], capture_output=True, text=True, timeout=timeout + 3)
+        choice = r.stderr.strip()
+        if choice == "1":
+            return "allow_once"
+        if choice == "2":
+            return "always_allow"
+        return "deny"
+
+    return "deny"  # headless with no dialog tool → defer safely
+
+
+def _ask_windows(title: str, msg: str, timeout: int) -> str:
+    """Windows: PowerShell WinForms 3-button dialog. Built-in, zero deps."""
+    safe_title = title.replace('"', "'")
+    safe_msg   = msg.replace('"', "'").replace("\\", "/")[:120]
+    ms         = timeout * 1000
+    ps = f"""Add-Type -AssemblyName System.Windows.Forms
+$form = New-Object System.Windows.Forms.Form
+$form.Text = "{safe_title}"
+$form.Size = New-Object System.Drawing.Size(460,160)
+$form.StartPosition = "CenterScreen"
+$form.TopMost = $true
+$form.FormBorderStyle = "FixedDialog"
+$form.MaximizeBox = $false
+$lbl = New-Object System.Windows.Forms.Label
+$lbl.Text = "{safe_msg}"
+$lbl.Location = New-Object System.Drawing.Point(12,18)
+$lbl.Size = New-Object System.Drawing.Size(430,45)
+$lbl.AutoEllipsis = $true
+$form.Controls.Add($lbl)
+$r = [ref]"deny"
+$b1 = New-Object System.Windows.Forms.Button
+$b1.Text = "Allow Once"; $b1.Location = New-Object System.Drawing.Point(12,80)
+$b1.Size = New-Object System.Drawing.Size(120,32)
+$b1.Add_Click({{ $r.Value = "allow_once"; $form.Close() }})
+$form.Controls.Add($b1)
+$b2 = New-Object System.Windows.Forms.Button
+$b2.Text = "Always Allow"; $b2.Location = New-Object System.Drawing.Point(142,80)
+$b2.Size = New-Object System.Drawing.Size(120,32)
+$b2.Add_Click({{ $r.Value = "always_allow"; $form.Close() }})
+$form.Controls.Add($b2)
+$b3 = New-Object System.Windows.Forms.Button
+$b3.Text = "Deny"; $b3.Location = New-Object System.Drawing.Point(326,80)
+$b3.Size = New-Object System.Drawing.Size(120,32)
+$b3.BackColor = [System.Drawing.Color]::LightCoral
+$b3.Add_Click({{ $r.Value = "deny"; $form.Close() }})
+$form.Controls.Add($b3)
+$t = New-Object System.Windows.Forms.Timer
+$t.Interval = {ms}
+$t.Add_Tick({{ $r.Value = "deny"; $form.Close() }})
+$t.Start()
+$form.ShowDialog() | Out-Null
+$t.Stop()
+Write-Output $r.Value"""
+    r = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+        capture_output=True, text=True, timeout=timeout + 5,
+    )
+    return r.stdout.strip() or "deny"
+
+
+def ask_permission(title: str, msg: str, timeout: int) -> str:
+    """Show Allow Once / Always Allow / Deny dialog. Platform-aware."""
+    try:
+        if sys.platform == "darwin":
+            return _ask_macos(title, msg, timeout)
+        if sys.platform.startswith("linux"):
+            return _ask_linux(title, msg, timeout)
+        if sys.platform == "win32":
+            return _ask_windows(title, msg, timeout)
+    except Exception:
+        pass
+    return "deny"  # any failure → defer safely
+
+
+
 
 def log_decision(tool_name: str, summary: str, mode: str, decision: str) -> None:
     """Append one JSONL line to the audit log. Silently swallows all errors."""
@@ -461,13 +639,18 @@ def matches_exclude(command: str, patterns: list) -> bool:
 
 # ── Top-level classifiers ─────────────────────────────────────────────────────
 
-def classify_bash(tool_input: dict, mode: str, exclude_patterns: list = None) -> bool:
+def classify_bash(tool_input: dict, mode: str, exclude_patterns: list = None,
+                  always_allow: list = None) -> bool:
     if mode == "off":
         return False
 
     command = tool_input.get("command", "")
     if not command:
         return False
+
+    # Always-allow list (saved from previous notify-mode decisions)
+    if always_allow and command in always_allow:
+        return True
 
     # Exclude patterns always take precedence — even over force mode
     if exclude_patterns and matches_exclude(command, exclude_patterns):
@@ -546,24 +729,41 @@ def run_hook() -> None:
     safe_paths       = get_safe_write_paths(config)
     exclude_patterns = get_exclude_patterns(config)
     mcp_patterns     = get_mcp_allow_patterns(config)
+    always_allow     = get_always_allow_commands(config)
+    notify_timeout   = get_notify_timeout(config)
     sound            = get_sound_enabled(config)
     tool_name        = data.get("tool_name", "")
     tool_input       = data.get("tool_input", {})
+    is_notify        = (mode == "notify")
 
-    # Notify user when deferring (except off mode — user wants full manual control)
-    def _defer_with_notify(summary: str) -> None:
-        log_decision(tool_name, summary, mode, "defer")
-        if mode != "off":
+    def _handle_defer(summary: str) -> None:
+        """Defer with notification, or show interactive dialog in notify mode."""
+        if is_notify:
+            # Play Tink first so user knows to look at the dialog
             notify_input_needed(tool_name, summary, sound=sound)
+            title    = "Claude needs permission"
+            msg      = f"{tool_name}: {summary[:180]}"
+            decision = ask_permission(title, msg, notify_timeout)
+            log_decision(tool_name, summary, mode, decision)
+            if decision == "always_allow":
+                handle_always_allow(tool_name, tool_input, summary)
+                allow()
+            elif decision == "allow_once":
+                allow()
+            # else: fall through to defer()
+        else:
+            log_decision(tool_name, summary, mode, "defer")
+            if mode != "off":
+                notify_input_needed(tool_name, summary, sound=sound)
 
     try:
         if tool_name == "Bash":
             cmd = tool_input.get("command", "")
-            if classify_bash(tool_input, mode, exclude_patterns):
+            if classify_bash(tool_input, mode, exclude_patterns, always_allow):
                 log_decision(tool_name, cmd, mode, "allow")
                 allow()
             else:
-                _defer_with_notify(cmd)
+                _handle_defer(cmd)
 
         elif tool_name in ("Edit", "Write", "NotebookEdit"):
             path = tool_input.get("file_path", "") or tool_input.get("notebook_path", "")
@@ -571,14 +771,14 @@ def run_hook() -> None:
                 log_decision(tool_name, path, mode, "allow")
                 allow()
             else:
-                _defer_with_notify(path)
+                _handle_defer(path)
 
         elif tool_name.startswith("mcp__"):
             if classify_mcp(tool_name, mode, mcp_patterns):
                 log_decision(tool_name, "", mode, "allow")
                 allow()
             else:
-                _defer_with_notify(tool_name)
+                _handle_defer(tool_name)
 
     except Exception:
         pass  # crash → defer safely
@@ -627,12 +827,16 @@ def run_cli(args: list) -> None:
         config      = read_config()
         safe_paths  = get_safe_write_paths(config)
         excludes    = get_exclude_patterns(config)
-        mcp_pats    = get_mcp_allow_patterns(config)
-        sound       = get_sound_enabled(config)
-        icon        = MODE_ICONS.get(mode, "")
-        sound_icon  = "🔊" if sound else "🔇"
+        mcp_pats       = get_mcp_allow_patterns(config)
+        always_cmds    = get_always_allow_commands(config)
+        sound          = get_sound_enabled(config)
+        notify_timeout = get_notify_timeout(config)
+        icon           = MODE_ICONS.get(mode, "")
+        sound_icon     = "🔊" if sound else "🔇"
         print(f"Mode:              {icon}  {mode}")
         print(f"Sound:             {sound_icon}  {'on' if sound else 'off'}")
+        if mode == "notify":
+            print(f"Notify timeout:    {notify_timeout}s")
         print(f"Mode file:         {MODE_FILE}")
         print(f"Config:            {CONFIG_FILE}")
         print(f"Audit log:         {AUDIT_LOG}")
@@ -641,6 +845,9 @@ def run_cli(args: list) -> None:
             print(f"Exclude patterns:  {', '.join(excludes)}")
         if mcp_pats:
             print(f"MCP allow patterns:{', '.join(mcp_pats)}")
+        if always_cmds:
+            print(f"Always allow ({len(always_cmds)}): {', '.join(always_cmds[:3])}"
+                  + (" …" if len(always_cmds) > 3 else ""))
 
     elif subcmd == "audit":
         tail = 20

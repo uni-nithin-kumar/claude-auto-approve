@@ -4,19 +4,14 @@
     "/tmp",
     "~/workspace",
     "~/projects",
-    "~/dev",
-    "~/Obsidian",
-    "~/Documents/notes"
+    "~/dev"
   ],
   "exclude_patterns": [
     "git push.*--force",
-    "git push.*-f\\b",
-    "kubectl delete.*--all",
-    "DROP TABLE",
     "rm -rf /"
   ],
-  "mcp_allow_patterns": [
-    "^mcp__code-review-graph__"
-  ],
+  "mcp_allow_patterns": [],
+  "always_allow_commands": [],
+  "notify_timeout": 25,
   "sound": true
 }

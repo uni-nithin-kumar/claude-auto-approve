@@ -570,5 +570,93 @@ class TestAuditLog(unittest.TestCase):
             h.log_decision("Bash", "ls", "docs-write", "allow")  # must not raise
 
 
+class TestNotifyMode(unittest.TestCase):
+    """Tests for notify mode — new MODES entry and always_allow persistence."""
+
+    def test_notify_in_modes_tuple(self):
+        self.assertIn("notify", h.MODES)
+
+    def test_notify_icon_defined(self):
+        self.assertIn("notify", h.MODE_ICONS)
+
+    def test_get_always_allow_commands_default_empty(self):
+        self.assertEqual(h.get_always_allow_commands({}), [])
+
+    def test_get_always_allow_commands_from_config(self):
+        cfg = {"always_allow_commands": ["kubectl apply -f deploy.yaml"]}
+        self.assertEqual(h.get_always_allow_commands(cfg), ["kubectl apply -f deploy.yaml"])
+
+    def test_get_notify_timeout_default(self):
+        self.assertEqual(h.get_notify_timeout({}), 25)
+
+    def test_get_notify_timeout_custom(self):
+        self.assertEqual(h.get_notify_timeout({"notify_timeout": 40}), 40)
+
+    def test_classify_bash_always_allow_list_overrides(self):
+        # Command in always_allow list → approve even in read-only mode
+        self.assertTrue(h.classify_bash(
+            {"command": "kubectl apply -f deploy.yaml"},
+            "read-only",
+            always_allow=["kubectl apply -f deploy.yaml"]
+        ))
+
+    def test_classify_bash_always_allow_exact_match(self):
+        # Partial match doesn't count — must be exact
+        self.assertFalse(h.classify_bash(
+            {"command": "kubectl apply -f other.yaml"},
+            "read-only",
+            always_allow=["kubectl apply -f deploy.yaml"]
+        ))
+
+    def test_handle_always_allow_bash_saves_command(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({}, f)
+            tmp = Path(f.name)
+        try:
+            with patch.object(h, "CONFIG_FILE", tmp):
+                h.handle_always_allow("Bash", {"command": "kubectl apply -f x.yaml"},
+                                      "kubectl apply -f x.yaml")
+                cfg = json.loads(tmp.read_text())
+                self.assertIn("kubectl apply -f x.yaml", cfg["always_allow_commands"])
+        finally:
+            tmp.unlink()
+
+    def test_handle_always_allow_mcp_saves_pattern(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({}, f)
+            tmp = Path(f.name)
+        try:
+            with patch.object(h, "CONFIG_FILE", tmp):
+                h.handle_always_allow("mcp__atlassian__createJiraIssue", {}, "")
+                cfg = json.loads(tmp.read_text())
+                self.assertTrue(any("createJiraIssue" in p for p in cfg["mcp_allow_patterns"]))
+        finally:
+            tmp.unlink()
+
+    def test_handle_always_allow_edit_saves_parent_dir(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({}, f)
+            tmp = Path(f.name)
+        try:
+            with patch.object(h, "CONFIG_FILE", tmp):
+                h.handle_always_allow("Edit", {"file_path": "/etc/cron.d/myjob"}, "")
+                cfg = json.loads(tmp.read_text())
+                self.assertIn("/etc/cron.d", cfg["safe_write_paths"])
+        finally:
+            tmp.unlink()
+
+    def test_handle_always_allow_no_duplicate(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({"always_allow_commands": ["kubectl apply -f x.yaml"]}, f)
+            tmp = Path(f.name)
+        try:
+            with patch.object(h, "CONFIG_FILE", tmp):
+                h.handle_always_allow("Bash", {}, "kubectl apply -f x.yaml")
+                cfg = json.loads(tmp.read_text())
+                self.assertEqual(cfg["always_allow_commands"].count("kubectl apply -f x.yaml"), 1)
+        finally:
+            tmp.unlink()
+
+
 if __name__ == "__main__":
     unittest.main()
