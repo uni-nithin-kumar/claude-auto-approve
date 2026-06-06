@@ -1,0 +1,10 @@
+{
+  "safe_write_paths": [
+    "~/workspace",
+    "~/sandbox",
+    "~/.claude",
+    "/tmp",
+    "~/Obsidian",
+    "~/Documents/notes"
+  ]
+}
