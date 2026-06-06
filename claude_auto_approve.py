@@ -328,8 +328,79 @@ def classify_mcp(tool_name: str, mode: str) -> bool:
     return any(action.startswith(p) for p in read_prefixes)
 
 
-def main():
+# ── Hook entry point ──────────────────────────────────────────────────────────
+
+def run_hook() -> None:
+    try:
+        data = json.load(sys.stdin)
+    except Exception:
+        defer()
+        return
+
+    mode = read_mode()
+    config = read_config()
+    safe_paths = get_safe_write_paths(config)
+    tool_name = data.get("tool_name", "")
+    tool_input = data.get("tool_input", {})
+
+    try:
+        if tool_name == "Bash":
+            if classify_bash(tool_input, mode):
+                allow()
+        elif tool_name in ("Edit", "Write", "NotebookEdit"):
+            if classify_edit_write(tool_input, mode, safe_paths):
+                allow()
+        elif tool_name.startswith("mcp__"):
+            if classify_mcp(tool_name, mode):
+                allow()
+    except Exception:
+        pass  # crash → defer safely
+
     defer()
+
+
+# ── CLI entry point ───────────────────────────────────────────────────────────
+
+def run_cli(args: list) -> None:
+    if not args:
+        print("Usage: claude-auto-approve mode <read-only|docs-write|force|off>")
+        print("       claude-auto-approve status")
+        sys.exit(1)
+
+    subcmd = args[0]
+
+    if subcmd == "mode":
+        if len(args) < 2:
+            print(f"Usage: claude-auto-approve mode <{'|'.join(MODES)}>")
+            sys.exit(1)
+        mode = args[1]
+        if mode not in MODES:
+            print(f"Unknown mode '{mode}'. Valid: {', '.join(MODES)}")
+            sys.exit(1)
+        write_mode(mode)
+        print(f"Mode set to: {mode}")
+
+    elif subcmd == "status":
+        mode = read_mode()
+        config = read_config()
+        safe_paths = get_safe_write_paths(config)
+        print(f"Mode:        {mode}")
+        print(f"Mode file:   {MODE_FILE}")
+        print(f"Config:      {CONFIG_FILE}")
+        print(f"Safe paths:  {', '.join(safe_paths)}")
+
+    else:
+        print(f"Unknown command '{subcmd}'")
+        sys.exit(1)
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    if len(sys.argv) > 1:
+        run_cli(sys.argv[1:])
+    else:
+        run_hook()
 
 
 if __name__ == "__main__":
