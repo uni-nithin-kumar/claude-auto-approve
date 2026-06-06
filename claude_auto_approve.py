@@ -36,6 +36,7 @@ SAFE_SIMPLE_COMMANDS = {
     "sort", "uniq", "cut", "tr", "echo", "printf", "env", "printenv",
     "which", "type", "date", "uname", "hostname", "uptime", "pwd",
     "dirname", "basename", "jq", "yq", "ps", "lsof", "pgrep", "rg", "grep",
+    "cd", "mkdir", "touch",
 }
 
 # git reads — safe in read-only mode
