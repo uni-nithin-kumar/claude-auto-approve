@@ -177,12 +177,20 @@ def log_decision(tool_name: str, summary: str, mode: str, decision: str) -> None
 
 # ── Notifications ─────────────────────────────────────────────────────────────
 
-# ── Notifications ─────────────────────────────────────────────────────────────
-
 def _notify_macos(title: str, msg: str, sound: bool) -> None:
-    script = f'display notification "{msg}" with title "{title}"'
+    # Sound via afplay — always works regardless of notification permission settings
     if sound:
-        script += ' sound name "Glass"'
+        sounds = [
+            "/System/Library/Sounds/Glass.aiff",
+            "/System/Library/Sounds/Ping.aiff",
+            "/System/Library/Sounds/Tink.aiff",
+        ]
+        for s in sounds:
+            if Path(s).exists():
+                subprocess.run(["afplay", s], capture_output=True, timeout=3)
+                break
+    # Visual banner via osascript (requires Script Editor → Banners in System Settings)
+    script = f'display notification "{msg}" with title "{title}"'
     subprocess.run(["osascript", "-e", script], capture_output=True, timeout=3)
 
 
