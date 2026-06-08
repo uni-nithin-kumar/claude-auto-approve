@@ -14,7 +14,7 @@ Intelligent multi-mode auto-approval hook for [Claude Code](https://claude.ai/co
 ## Install
 
 ```bash
-git clone https://github.com/your-username/claude-auto-approve
+git clone https://github.com/uni-nithin-kumar/claude-auto-approve
 cd claude-auto-approve
 ./install.sh
 ```
