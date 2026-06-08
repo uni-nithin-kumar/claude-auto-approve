@@ -19,7 +19,7 @@ from pathlib import Path
 
 # ── Modes ────────────────────────────────────────────────────────────────────
 MODES = ("read-only", "docs-write", "force", "off")
-DEFAULT_MODE = "docs-write"
+DEFAULT_MODE = "read-only"  # conservative default for new installs; switch to docs-write for git write ops
 
 MODE_FILE   = Path.home() / ".claude" / "hooks" / ".approve-mode"
 CONFIG_FILE = Path.home() / ".claude" / "hooks" / "claude-auto-approve.json"
@@ -366,6 +366,15 @@ def is_safe_tee(command: str) -> bool:
     return "/dev/null" in command
 
 
+def is_safe_cp(command: str, safe_paths: list) -> bool:
+    """cp is safe if the destination resolves under a safe write path."""
+    parts = command.strip().split()
+    if len(parts) < 3:
+        return False
+    dest = parts[-1]
+    return is_safe_path(dest, safe_paths)
+
+
 def is_safe_python(command: str) -> bool:
     if "--version" in command or " -V" in command:
         return True
@@ -374,7 +383,8 @@ def is_safe_python(command: str) -> bool:
     return False
 
 
-def is_safe_segment(seg: str, allow_git_writes: bool = True, allow_localhost_post: bool = True) -> bool:
+def is_safe_segment(seg: str, allow_git_writes: bool = True,
+                    allow_localhost_post: bool = True, safe_paths: list = None) -> bool:
     seg = seg.strip()
     if not seg:
         return True
@@ -409,6 +419,8 @@ def is_safe_segment(seg: str, allow_git_writes: bool = True, allow_localhost_pos
         return len(parts) > 1 and parts[1] in ("list", "ls", "version")
     if cmd_name == "brew":
         return len(parts) > 1 and parts[1] in ("list", "info", "outdated")
+    if cmd_name == "cp":
+        return is_safe_cp(seg, safe_paths) if safe_paths else False
     return False
 
 
@@ -461,7 +473,8 @@ def matches_exclude(command: str, patterns: list) -> bool:
 
 # ── Top-level classifiers ─────────────────────────────────────────────────────
 
-def classify_bash(tool_input: dict, mode: str, exclude_patterns: list = None) -> bool:
+def classify_bash(tool_input: dict, mode: str, exclude_patterns: list = None,
+                  safe_paths: list = None) -> bool:
     if mode == "off":
         return False
 
@@ -491,7 +504,8 @@ def classify_bash(tool_input: dict, mode: str, exclude_patterns: list = None) ->
         return False
     return all(
         is_safe_segment(seg, allow_git_writes=allow_git_writes,
-                        allow_localhost_post=allow_localhost_post)
+                        allow_localhost_post=allow_localhost_post,
+                        safe_paths=safe_paths)
         for seg in segments
     )
 
@@ -559,7 +573,7 @@ def run_hook() -> None:
     try:
         if tool_name == "Bash":
             cmd = tool_input.get("command", "")
-            if classify_bash(tool_input, mode, exclude_patterns):
+            if classify_bash(tool_input, mode, exclude_patterns, safe_paths):
                 log_decision(tool_name, cmd, mode, "allow")
                 allow()
             else:

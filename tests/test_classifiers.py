@@ -17,7 +17,7 @@ import claude_auto_approve as h
 class TestReadMode(unittest.TestCase):
     def test_returns_default_when_file_missing(self):
         with patch.object(h, "MODE_FILE", Path("/nonexistent/.approve-mode")):
-            self.assertEqual(h.read_mode(), "docs-write")
+            self.assertEqual(h.read_mode(), "read-only")  # OSS default is now read-only
 
     def test_reads_valid_mode_from_file(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".mode", delete=False) as f:
@@ -35,7 +35,7 @@ class TestReadMode(unittest.TestCase):
             tmp = Path(f.name)
         try:
             with patch.object(h, "MODE_FILE", tmp):
-                self.assertEqual(h.read_mode(), "docs-write")
+                self.assertEqual(h.read_mode(), "read-only")  # falls back to OSS default
         finally:
             tmp.unlink()
 
@@ -310,6 +310,31 @@ class TestIsafeSegment(unittest.TestCase):
         self.assertFalse(h.is_safe_segment(
             "curl -X POST http://localhost:8089/api -d '{}'",
             allow_localhost_post=False
+        ))
+
+    def test_cp_to_safe_path_approved(self):
+        home = str(Path.home())
+        self.assertTrue(h.is_safe_segment(
+            f"cp file.py {home}/.claude/hooks/auto_approve.py",
+            safe_paths=[f"{home}/.claude"]
+        ))
+
+    def test_cp_to_unsafe_path_defers(self):
+        self.assertFalse(h.is_safe_segment(
+            "cp file.py /etc/cron.d/myjob",
+            safe_paths=["/tmp"]
+        ))
+
+    def test_cp_without_safe_paths_defers(self):
+        # No safe_paths provided → cp always defers
+        self.assertFalse(h.is_safe_segment("cp file.py /tmp/dest"))
+
+    def test_cp_in_compound_with_git_approved(self):
+        home = str(Path.home())
+        self.assertTrue(h.classify_bash(
+            {"command": f"git add . && git commit -m fix && git push && cp claude_auto_approve.py {home}/.claude/hooks/auto_approve.py"},
+            "docs-write",
+            safe_paths=[f"{home}/.claude", "/tmp"]
         ))
 
 
