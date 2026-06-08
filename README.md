@@ -74,7 +74,6 @@ Compound commands (`cmd1 | cmd2 && cmd3`) are split and every segment must be sa
 |-------------|-------------|--------------|
 | `ls`, `grep`, `cat`, `jq`, etc. | yes | yes |
 | `git log/status/diff/show` | yes | yes |
-| `git add/commit/push` (non-force) | no | yes |
 | `git push --force` | no | no |
 | `curl` GET (any host) | yes | yes |
 | `curl` POST to localhost | no | yes |
